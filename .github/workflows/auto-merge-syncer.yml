@@ -1,11 +1,19 @@
 name: Auto Merge for exercism-solutions-syncer
+
+# 给 workflow 明确权限（需要写权限来启用 auto-merge）
+permissions:
+  pull-requests: write
+
 on:
+  workflow_dispatch:    # 允许手动运行（便于一次性处理现有 PR）
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 
 jobs:
   auto-merge:
-    if: github.event.pull_request.user.login == 'exercism-solutions-syncer'
+    # 允许触发 PR 作者包含 "exercism-solutions-syncer" 的情况，
+    # 或者当以 workflow_dispatch 手动触发时也运行（以处理现有 PR）
+    if: contains(github.event.pull_request.user.login, 'exercism-solutions-syncer') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Check if auto-merge is available
@@ -13,30 +21,61 @@ jobs:
         run: |
           # 等待状态检查完成（可选）
           sleep 10
-          
+
       - name: Enable auto-merge
         if: success()
         uses: actions/github-script@v6
         with:
           script: |
-            // 启用自动合并
-            await github.graphql(`
-              mutation enableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
-                enablePullRequestAutoMerge(input: {
-                  pullRequestId: $pullRequestId,
-                  mergeMethod: $mergeMethod
-                }) {
-                  pullRequest {
-                    autoMergeRequest {
-                      enabledAt
+            // 在 workflow_dispatch 下枚举 open PR 并为匹配的 PR 启用 auto-merge
+            async function enableForPullRequest(nodeId) {
+              await github.graphql(`
+                mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+                  enablePullRequestAutoMerge(input: {
+                    pullRequestId: $pullRequestId,
+                    mergeMethod: $mergeMethod
+                  }) {
+                    pullRequest {
+                      autoMergeRequest {
+                        enabledAt
+                      }
                     }
                   }
                 }
+              `, {
+                pullRequestId: nodeId,
+                mergeMethod: "MERGE"
+              });
+            }
+
+            try {
+              if (context.eventName === 'workflow_dispatch') {
+                const owner = context.repo.owner;
+                const repo = context.repo.repo;
+                const prs = await github.rest.pulls.list({
+                  owner, repo, state: 'open', per_page: 100
+                });
+                for (const pr of prs.data) {
+                  if (pr.user && pr.user.login && pr.user.login.includes('exercism-solutions-syncer')) {
+                    console.log('Enabling auto-merge for PR #' + pr.number + ' (user: ' + pr.user.login + ')');
+                    await enableForPullRequest(pr.node_id);
+                    console.log('Requested auto-merge for PR #' + pr.number);
+                  }
+                }
+              } else {
+                if (!context.payload.pull_request) {
+                  console.log('No pull_request in context, nothing to do.');
+                } else {
+                  const nodeId = context.payload.pull_request.node_id;
+                  console.log('Enabling auto-merge for triggering PR (node id: ' + nodeId + ')');
+                  await enableForPullRequest(nodeId);
+                  console.log('Requested auto-merge for triggering PR');
+                }
               }
-            `, {
-              pullRequestId: context.payload.pull_request.node_id,
-              mergeMethod: "MERGE"  # 或 "SQUASH"、"REBASE"
-            })
-            
+            } catch (err) {
+              console.error('Enable auto-merge failed:', err);
+              throw err;
+            }
+
       - name: Log auto-merge enabled
-        run: echo "Auto-merge enabled for PR by exercism-solutions-syncer"
+        run: echo "Auto-merge enable step completed"

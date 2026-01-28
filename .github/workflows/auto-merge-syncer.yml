@@ -1,0 +1,42 @@
+name: Auto Merge for exercism-solutions-syncer
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'exercism-solutions-syncer'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if auto-merge is available
+        id: check
+        run: |
+          # 等待状态检查完成（可选）
+          sleep 10
+          
+      - name: Enable auto-merge
+        if: success()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // 启用自动合并
+            await github.graphql(`
+              mutation enableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $pullRequestId,
+                  mergeMethod: $mergeMethod
+                }) {
+                  pullRequest {
+                    autoMergeRequest {
+                      enabledAt
+                    }
+                  }
+                }
+              }
+            `, {
+              pullRequestId: context.payload.pull_request.node_id,
+              mergeMethod: "MERGE"  # 或 "SQUASH"、"REBASE"
+            })
+            
+      - name: Log auto-merge enabled
+        run: echo "Auto-merge enabled for PR by exercism-solutions-syncer"

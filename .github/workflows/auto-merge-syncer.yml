@@ -3,6 +3,7 @@ name: Auto Merge for exercism-solutions-syncer
 # 给 workflow 明确权限（需要写权限来启用 auto-merge）
 permissions:
   pull-requests: write
+  contents: write
 
 on:
   workflow_dispatch:    # 允许手动运行（便于一次性处理现有 PR）

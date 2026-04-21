@@ -1,82 +1,92 @@
 name: Auto Merge for exercism-solutions-syncer
 
-# 给 workflow 明确权限（需要写权限来启用 auto-merge）
 permissions:
   pull-requests: write
   contents: write
 
 on:
-  workflow_dispatch:    # 允许手动运行（便于一次性处理现有 PR）
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 
 jobs:
   auto-merge:
-    # 允许触发 PR 作者包含 "exercism-solutions-syncer" 的情况，
-    # 或者当以 workflow_dispatch 手动触发时也运行（以处理现有 PR）
     if: contains(github.event.pull_request.user.login, 'exercism-solutions-syncer') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Check if auto-merge is available
-        id: check
-        run: |
-          # 等待状态检查完成（可选）
-          sleep 10
-
-      - name: Enable auto-merge
-        if: success()
+      - name: Enable auto-merge with retry
         uses: actions/github-script@v6
         with:
           script: |
-            // 在 workflow_dispatch 下枚举 open PR 并为匹配的 PR 启用 auto-merge
-            async function enableForPullRequest(nodeId) {
-              await github.graphql(`
-                mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
-                  enablePullRequestAutoMerge(input: {
-                    pullRequestId: $pullRequestId,
-                    mergeMethod: $mergeMethod
-                  }) {
-                    pullRequest {
-                      autoMergeRequest {
-                        enabledAt
-                      }
-                    }
+            const MAX_RETRIES = 10;
+            const RETRY_DELAY = 5000; // 5 seconds
+            
+            async function enableForPullRequest(nodeId, octokit, retryCount = 0) {
+              try {
+                // 使用 REST API 而不是 GraphQL（更稳定）
+                const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+                const prNumber = context.payload.pull_request?.number || 
+                                (context.eventName === 'workflow_dispatch' ? null : null);
+                
+                // 尝试启用 auto-merge
+                await octokit.rest.pulls.update({
+                  owner,
+                  repo,
+                  pull_number: parseInt(prNumber),
+                  merge_method: 'merge', // 或 'squash', 'rebase'
+                  auto_merge: true
+                });
+                
+                console.log(`✅ Auto-merge enabled for PR #${prNumber}`);
+                return true;
+              } catch (err) {
+                if (err.status === 422 && err.message?.includes('unstable')) {
+                  if (retryCount < MAX_RETRIES) {
+                    console.log(`⚠️ PR is unstable, retrying in ${RETRY_DELAY/1000}s... (Attempt ${retryCount + 1}/${MAX_RETRIES})`);
+                    await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                    return enableForPullRequest(nodeId, octokit, retryCount + 1);
+                  } else {
+                    console.error(`❌ Failed to enable auto-merge after ${MAX_RETRIES} attempts`);
+                    throw err;
                   }
                 }
-              `, {
-                pullRequestId: nodeId,
-                mergeMethod: "MERGE"
-              });
+                throw err;
+              }
             }
-
+            
             try {
               if (context.eventName === 'workflow_dispatch') {
+                // 手动触发：处理所有 open PR
                 const owner = context.repo.owner;
                 const repo = context.repo.repo;
                 const prs = await github.rest.pulls.list({
                   owner, repo, state: 'open', per_page: 100
                 });
+                
                 for (const pr of prs.data) {
                   if (pr.user && pr.user.login && pr.user.login.includes('exercism-solutions-syncer')) {
-                    console.log('Enabling auto-merge for PR #' + pr.number + ' (user: ' + pr.user.login + ')');
-                    await enableForPullRequest(pr.node_id);
-                    console.log('Requested auto-merge for PR #' + pr.number);
+                    console.log(`Processing PR #${pr.number} (user: ${pr.user.login})`);
+                    try {
+                      await enableForPullRequest(pr.node_id, github);
+                    } catch (err) {
+                      console.error(`Failed for PR #${pr.number}:`, err.message);
+                    }
+                    // 避免 API 限流
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                   }
                 }
               } else {
-                if (!context.payload.pull_request) {
-                  console.log('No pull_request in context, nothing to do.');
-                } else {
-                  const nodeId = context.payload.pull_request.node_id;
-                  console.log('Enabling auto-merge for triggering PR (node id: ' + nodeId + ')');
-                  await enableForPullRequest(nodeId);
-                  console.log('Requested auto-merge for triggering PR');
+                // PR 事件触发：只处理当前 PR
+                const pr = context.payload.pull_request;
+                if (!pr) {
+                  console.log('No pull_request in context');
+                  return;
                 }
+                
+                console.log(`Enabling auto-merge for PR #${pr.number}`);
+                await enableForPullRequest(pr.node_id, github);
               }
             } catch (err) {
               console.error('Enable auto-merge failed:', err);
               throw err;
             }
-
-      - name: Log auto-merge enabled
-        run: echo "Auto-merge enable step completed"
